@@ -687,89 +687,135 @@ const CardBatcherPro = ({ showSidebar = true, onBackToDashboard }) => {
             ? JSON.parse(order.card_data)
             : (order.card_data || []);
 
-          // Debug: Log raw order data to trace bleed
-          console.log('🔎 Order raw data:', {
+          // Debug: Log order data summary
+          console.log('🔎 Order:', {
             orderId: order.id,
-            customerName: customerName,
-            card_data_type: typeof order.card_data,
-            card_data_length: Array.isArray(cardData) ? cardData.length : 'NOT_ARRAY',
-            card_data_raw: order.card_data,
-            card_data_first: cardData[0],
-            order_keys: Object.keys(order)
+            customerName,
+            images: cardImages.length,
+            cardData: cardData.length,
+            tripletFormat: cardImages.length % 3 === 0,
+            firstCardBleed: cardData[0] ? { hasBleed: cardData[0].hasBleed, bleedMm: cardData[0].bleedMm } : 'no card_data'
           });
 
           // Extract order date
           const orderDate = order.created_at ? new Date(order.created_at).toISOString().split('T')[0] : null;
 
-          // Parse card images into front/back pairs (similar to OrderDetail.jsx)
-          let i = 0;
-          let cardDataIndex = 0; // Track position in cardData array
-          while (i < cardImages.length) {
-            const current = cardImages[i];
+          // Parse card images into front/back/mask sets.
+          // The storefront ALWAYS saves card_images as strict triplets:
+          //   [front1, back1, mask1, front2, back2, mask2, ...]
+          // with empty strings for missing entries.  card_data has one
+          // entry per card at the matching index (cardData[0] → triplet 0, etc.).
+          //
+          // Use triplet-based parsing when the array length is a multiple of 3
+          // and matches card_data length.  Fall back to heuristic parsing for
+          // legacy / non-triplet data.
 
-            // Skip empty strings (placeholder for non-existent masks) and standalone masks
-            if (!current || current === '' || isMask(current)) {
-              i++;
-              continue;
+          const isTripletFormat = cardImages.length > 0
+            && cardImages.length % 3 === 0
+            && (cardData.length === 0 || cardData.length === cardImages.length / 3);
+
+          if (isTripletFormat) {
+            // --- Triplet parsing (reliable, index-aligned with card_data) ---
+            for (let t = 0; t < cardImages.length; t += 3) {
+              const front = cardImages[t] || '';
+              const back  = cardImages[t + 1] || '';
+              const mask  = cardImages[t + 2] || '';
+
+              // Skip triplets where the front is empty (no card)
+              if (!front || front === '') continue;
+
+              const cardDataIdx = t / 3;
+              const frontUrl = getOrderImageUrl(front);
+              const backUrl  = (back && back !== '') ? getOrderImageUrl(back) : null;
+              const maskUrl  = (mask && mask !== '' && isMask(mask)) ? getOrderImageUrl(mask) : ((mask && mask !== '') ? getOrderImageUrl(mask) : undefined);
+
+              // Get bleed settings from card_data for this card
+              const cardMetadata = cardData[cardDataIdx] || {};
+              const rawHasBleed = cardMetadata.hasBleed;
+              const bleedMmRaw = cardMetadata.bleedMm !== undefined ? cardMetadata.bleedMm : (rawHasBleed ? 1.9 : 0);
+              const bleedMm = Number.isFinite(Number(bleedMmRaw)) ? Number(bleedMmRaw) : 0;
+              const hasBleed = Boolean(rawHasBleed) || bleedMm > 0;
+              const trimMm = Number.isFinite(Number(cardMetadata.trimMm)) ? Number(cardMetadata.trimMm) : 0;
+
+              if (cardDataIdx === 0) {
+                console.log('📏 Bleed Debug (triplet):', { hasBleed, bleedMm, trimMm, cardMetadata, cardDataIdx });
+              }
+
+              newCards.push({
+                id: Math.random().toString(36).substr(2, 9),
+                url: frontUrl,
+                file: null,
+                customBack: backUrl,
+                spotMask: maskUrl,
+                customerName: customerName,
+                orderId: order.id,
+                orderDate: orderDate,
+                hasBleed: hasBleed,
+                bleedMm: bleedMm,
+                trimMm: trimMm
+              });
             }
+          } else {
+            // --- Legacy heuristic parsing (variable-length arrays) ---
+            let i = 0;
+            let cardDataIndex = 0;
+            while (i < cardImages.length) {
+              const current = cardImages[i];
 
-            // It's a front image, look for back and potentially mask
-            const front = current;
-            let back = null;
-            let mask = null;
-            let consumed = 1; // We always consume the front
+              if (!current || current === '' || isMask(current)) {
+                i++;
+                continue;
+              }
 
-            // Check for back at i+1
-            if (cardImages[i + 1] && !isMask(cardImages[i + 1])) {
-              back = cardImages[i + 1];
-              consumed++;
-              // Check for mask at i+2
-              if (cardImages[i + 2] && isMask(cardImages[i + 2])) {
-                mask = cardImages[i + 2];
+              const front = current;
+              let back = null;
+              let mask = null;
+              let consumed = 1;
+
+              if (cardImages[i + 1] && !isMask(cardImages[i + 1])) {
+                back = cardImages[i + 1];
+                consumed++;
+                if (cardImages[i + 2] && isMask(cardImages[i + 2])) {
+                  mask = cardImages[i + 2];
+                  consumed++;
+                }
+              } else if (cardImages[i + 1] && isMask(cardImages[i + 1])) {
+                mask = cardImages[i + 1];
                 consumed++;
               }
-            } else if (cardImages[i + 1] && isMask(cardImages[i + 1])) {
-              // No back, but mask at i+1
-              mask = cardImages[i + 1];
-              consumed++;
+
+              const frontUrl = getOrderImageUrl(front);
+              const backUrl = back ? getOrderImageUrl(back) : null;
+              const maskUrl = mask ? getOrderImageUrl(mask) : undefined;
+
+              const cardMetadata = cardData[cardDataIndex] || {};
+              const rawHasBleed = cardMetadata.hasBleed;
+              const bleedMmRaw = cardMetadata.bleedMm !== undefined ? cardMetadata.bleedMm : (rawHasBleed ? 1.9 : 0);
+              const bleedMm = Number.isFinite(Number(bleedMmRaw)) ? Number(bleedMmRaw) : 0;
+              const hasBleed = Boolean(rawHasBleed) || bleedMm > 0;
+              const trimMm = Number.isFinite(Number(cardMetadata.trimMm)) ? Number(cardMetadata.trimMm) : 0;
+
+              if (cardDataIndex === 0) {
+                console.log('📏 Bleed Debug (legacy):', { hasBleed, bleedMm, trimMm, cardMetadata });
+              }
+
+              newCards.push({
+                id: Math.random().toString(36).substr(2, 9),
+                url: frontUrl,
+                file: null,
+                customBack: backUrl,
+                spotMask: maskUrl,
+                customerName: customerName,
+                orderId: order.id,
+                orderDate: orderDate,
+                hasBleed: hasBleed,
+                bleedMm: bleedMm,
+                trimMm: trimMm
+              });
+
+              i += consumed;
+              cardDataIndex++;
             }
-
-            // Get image URLs
-            const frontUrl = getOrderImageUrl(front);
-            const backUrl = back ? getOrderImageUrl(back) : null;
-            const maskUrl = mask ? getOrderImageUrl(mask) : undefined;
-
-            // Get bleed settings from card_data for this card
-            const cardMetadata = cardData[cardDataIndex] || {};
-            const rawHasBleed = cardMetadata.hasBleed;
-            const bleedMmRaw = cardMetadata.bleedMm !== undefined ? cardMetadata.bleedMm : (rawHasBleed ? 1.9 : 0);
-            const bleedMm = Number.isFinite(Number(bleedMmRaw)) ? Number(bleedMmRaw) : 0;
-            const hasBleed = Boolean(rawHasBleed) || bleedMm > 0;
-            const trimMm = Number.isFinite(Number(cardMetadata.trimMm)) ? Number(cardMetadata.trimMm) : 0;
-
-            // Debug: Log bleed settings for first card
-            if (cardDataIndex === 0) {
-              console.log('📏 Bleed Debug:', { hasBleed, bleedMm, trimMm, cardMetadata });
-            }
-
-            // Add card (with optional spot mask, order date, and bleed settings)
-            newCards.push({
-              id: Math.random().toString(36).substr(2, 9),
-              url: frontUrl,
-              file: null,
-              customBack: backUrl,
-              spotMask: maskUrl,
-              customerName: customerName,
-              orderId: order.id,
-              orderDate: orderDate, // Add order date to card
-              hasBleed: hasBleed, // Bleed enabled flag
-              bleedMm: bleedMm, // Bleed amount in mm
-              trimMm: trimMm // Trim amount in mm
-            });
-
-            // Advance index by the number of items we consumed
-            i += consumed;
-            cardDataIndex++; // Move to next card in cardData array
           }
         });
       });
